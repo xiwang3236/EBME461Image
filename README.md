@@ -52,3 +52,5 @@ Here are some optimizations to try.
 2- Iteration array=[5000 400 200], Accumulated Field Smoothing (AFS)= 3
 3- Iteration array=[50 20 5], Accumulated Field Smoothing (AFS)= 30
 4- Iteration array=[50 20 5], Accumulated Field Smoothing (AFS)= 3
+
+![image](https://github.com/user-attachments/assets/6caef69f-d94b-4fb9-bccd-3b46a709e5e9)
