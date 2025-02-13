@@ -1,8 +1,6 @@
 function R=myNCC(image1,image2)
 s1=size(image1);
 s2=size(image2);
-%image1=double(image1);
-%image2=double(image2);
 % n parameter to control similarity metrics
 % n=1 normalized cross-correlation 2sum of absolute difference  3 sum of square
 % error
