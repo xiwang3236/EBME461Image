@@ -24,17 +24,6 @@ if n==1
    R=a/sqrt(c*d);
 end
 
-if n==2
-    %sum of absolute difference
-    difference=image1 - image2;
-    R=sum(abs(difference),"all");
-end
-
-if n==3
-    %sum of square
-    difference=image1 - image2;
-    sqdiff=difference.^2;
-    R=sum(sqdiff,"all");
 end
 
 
