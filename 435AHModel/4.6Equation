@@ -1,1 +1,463 @@
+%% Aqueous Humor Production Model
+% Based on the paper by Dvoriashyna et al. (2022)
+% "A Mathematical Model of Aqueous Humor Production and Composition"
 
+%% Initialize Parameters
+% Geometric parameters
+params.L = 1e-5;                % Cell length (m)
+params.H = 6e-3;                % PC length (m)
+params.As = 6e-4;               % Stromal side membrane area (m^2)
+params.Ap = 6e-4;               % PC side membrane area (m^2)
+params.Atj = 6e-7;              % Tight junction area (m^2)
+params.APC = 2.6e-5;            % PC area at boundary with ciliary processes (m^2)
+
+% Hydraulic conductivities and permeabilities
+params.Ks = 2e-11;              % Hydraulic conductivity of stromal membrane (m/s/Pa)
+params.Kp = 2e-10;              % Hydraulic conductivity of PC membrane (m/s/Pa)
+params.Ktj = 2e-11;             % Hydraulic conductivity of tight junction (m/s/Pa)
+
+% Permeabilities to CO2 and H2CO3
+params.PsCO2 = 1.5e-3;          % Stromal permeability to CO2 (m/s)
+params.PpCO2 = 1.5e-2;          % PC permeability to CO2 (m/s)
+params.PsH2CO3 = 1.28e-5;       % Stromal permeability to H2CO3 (m/s)
+params.PpH2CO3 = 1.28e-4;       % PC permeability to H2CO3 (m/s)
+
+% Reaction rates
+params.kd = 4.96e5;             % Dehydration rate constant (1/s)
+params.kh = 1.45e3;             % Hydration rate constant (1/s)
+params.Kd = 5.3;                % Equilibrium constant (1/mM)
+
+% Other parameters
+params.T = 310;                 % Temperature (K)
+params.sigma = 1;               % Reflection coefficient
+params.zX = -1.5;               % Valence of fixed non-diffusible species
+
+% Ion channel parameters
+params.PPUMP = 6e-6;            % Na+-K+ ATPase intensity (mol/m^2/s)
+params.PNKCC = 1e-6;            % Co-transporter Na+/K+/2Cl- intensity (mol/m^2/s)
+params.PAEs = 4e-6;             % Anion exchanger Cl-/HCO3- intensity (stromal side) (mol/m^2/s)
+params.PAEp = 0.4e-6;           % Anion exchanger Cl-/HCO3- intensity (PC side) (mol/m^2/s)
+params.PNBCp = 1e-6;            % Na+-HCO3- co-transporter intensity (PC side) (mol/m^2/s)
+params.PNBCs = 6e-6;            % Na+-HCO3- co-transporter intensity (stromal side) (mol/m^2/s)
+params.PNHE = 3.4e-6;           % Na+-H+ exchanger intensity (mol/m^2/s)
+
+% Permeabilities of ion channels
+params.PsK = 5e-8;              % Stromal permeability to K+ (m/s)
+params.PpK = 30e-8;             % PC permeability to K+ (m/s)
+params.PpCl = 6e-8;             % PC permeability to Cl- (m/s)
+params.Ptj = 600e-8;            % Tight junction permeability (m/s)
+
+% Constants
+params.R = 8.314;               % Universal gas constant (J/mol/K)
+params.F = 96485;               % Faraday's constant (C/mol)
+
+% Stromal conditions (boundary conditions)
+% Species: 1-Na+, 2-K+, 3-Cl-, 4-HCO3-, 5-H+, 6-CO2, 7-H2CO3
+params.Cs = [150, 5, 130, 25, 10^(-7.42), 1.5, 1.5*10^(-7.42)/5.3];  % Stromal concentrations (mM)
+params.Vs = 0;                  % Stromal potential (mV)
+
+% CA inhibition flag
+params.CA_inhibition = false;   % Set to true to simulate CA inhibition
+
+%% Time-dependent Model (for reaching steady state)
+function dydt = aqueous_humor_odes(t, y, params)
+    % Extract variables from y
+    % Cell concentrations (7 species)
+    Cc = y(1:7);
+    % PC concentrations (7 species)
+    Cp = y(8:14);
+    % Potentials
+    Vc = y(15);
+    Vp = y(16);
+    % Fixed non-diffusible charge concentration
+    CX = y(17);
+    % Water flux
+    Q = y(18);
+    
+    % Compartment volumes
+    Wc = params.As * params.L;       % Cell volume
+    Wp = params.APC * params.H;      % PC volume
+    
+    % Update reaction rates if CA inhibition is active
+    kd = params.kd;
+    kh = params.kh;
+    if params.CA_inhibition
+        kd = kd * 1e-6;
+        kh = kh * 1e-6;
+    end
+    
+    % Calculate dimensionless potential differences
+    phics = params.F * (Vc - params.Vs) / (params.R * params.T);
+    phicp = params.F * (Vc - Vp) / (params.R * params.T);
+    phisp = params.F * (params.Vs - Vp) / (params.R * params.T);
+    
+    % Calculate ion fluxes through channels and transporters
+    % Na+-K+ ATPase pump (PC side)
+    KNa = 0.2 * (1 + Cc(2) / 8.33);
+    KK = 0.1 * (1 + Cp(1) / 18.5);
+    JPUMP = params.Ap * params.PPUMP * (Cc(1)/(KNa + Cc(1)))^3 * (Cp(2)/(KK + Cp(2)))^2;
+    
+    % Na+-K+-2Cl- co-transporter (Stromal side)
+    JNKCC = params.As * params.PNKCC * log(Cc(2)*Cc(1)*(Cc(3))^2 / (params.Cs(2)*params.Cs(1)*(params.Cs(3))^2));
+    
+    % Na+-HCO3- co-transporter (Stromal side)
+    JNBCs = params.As * params.PNBCs * (log(Cc(1)*(Cc(4))^2 / (params.Cs(1)*(params.Cs(4))^2)) - phics);
+    
+    % Na+-HCO3- co-transporter (PC side)
+    JNBCp = params.Ap * params.PNBCp * (log(Cc(1)*(Cc(4))^2 / (Cp(1)*(Cp(4))^2)) - phicp);
+    
+    % Cl-/HCO3- exchanger (Stromal side)
+    JAEs = params.As * params.PAEs * log(params.Cs(3)*Cc(4) / (Cc(3)*params.Cs(4)));
+    
+    % Cl-/HCO3- exchanger (PC side)
+    JAEp = params.Ap * params.PAEp * log(Cp(3)*Cc(4) / (Cc(3)*Cp(4)));
+    
+    % Na+-H+ exchanger (Stromal side)
+    JNHE = params.As * params.PNHE * log(params.Cs(5)*Cc(1) / (Cc(5)*params.Cs(1)));
+    
+    % K+ channel (Stromal side)
+    JcsK = params.As * params.PsK * phics * (Cc(2) - params.Cs(2) * exp(-phics)) / (1 - exp(-phics));
+    
+    % K+ channel (PC side)
+    JcpK = params.Ap * params.PpK * phicp * (Cc(2) - Cp(2) * exp(-phicp)) / (1 - exp(-phicp));
+    
+    % Cl- channel (PC side)
+    JcpCl = params.Ap * params.PpCl * phicp * (Cc(3) - Cp(3) * exp(phicp)) / (1 - exp(phicp));
+    
+    % Fluxes through tight junctions
+    JspNa = params.Atj * params.Ptj * phisp * (params.Cs(1) - Cp(1) * exp(-phisp)) / (1 - exp(-phisp));
+    JspK = params.Atj * params.Ptj * phisp * (params.Cs(2) - Cp(2) * exp(-phisp)) / (1 - exp(-phisp));
+    JspCl = params.Atj * params.Ptj * phisp * (params.Cs(3) - Cp(3) * exp(phisp)) / (1 - exp(phisp));
+    JspHCO3 = params.Atj * params.Ptj * phisp * (params.Cs(4) - Cp(4) * exp(phisp)) / (1 - exp(phisp));
+    JspH = params.Atj * params.Ptj * phisp * (params.Cs(5) - Cp(5) * exp(-phisp)) / (1 - exp(-phisp));
+    
+    % CO2 and H2CO3 fluxes
+    JcsH2CO3 = params.As * params.PsH2CO3 * (Cc(7) - params.Cs(7));
+    JcsCO2 = params.As * params.PsCO2 * (Cc(6) - params.Cs(6));
+    JcpH2CO3 = params.Ap * params.PpH2CO3 * (Cc(7) - Cp(7));
+    JcpCO2 = params.Ap * params.PpCO2 * (Cc(6) - Cp(6));
+    JspH2CO3 = params.Atj * params.PsH2CO3 * (params.Cs(7) - Cp(7));
+    JspCO2 = params.Atj * params.PsCO2 * (params.Cs(6) - Cp(6));
+    
+    % Calculate water fluxes
+    % Calculate osmolarity differences
+    dCsc = sum(params.Cs - Cc) - CX;
+    dCcp = sum(Cc - Cp) - CX;
+    dCsp = sum(params.Cs - Cp);
+    
+    % Calculate water fluxes using osmosis
+    Qsc = -params.As * params.Ks * params.sigma * params.R * params.T * dCsc;
+    Qcp = -params.Ap * params.Kp * params.sigma * params.R * params.T * dCcp;
+    Qsp = -params.Atj * params.Ktj * params.sigma * params.R * params.T * dCsp;
+    
+    % Chemical reactions
+    % Fast equilibrium for H2CO3 <-> H+ + HCO3-
+    % RC4 = (k_-1 * Cc(7) - k_1 * Cc(4) * Cc(5)) * Wc;  % Assumed to be 0 (equilibrium)
+    % RP4 = (k_-1 * Cp(7) - k_1 * Cp(4) * Cp(5)) * Wp;  % Assumed to be 0 (equilibrium)
+    
+    % CO2 + H2O <-> H2CO3 reactions
+    RC6 = (-kh * Cc(6) + kd * Cc(7)) * Wc;
+    RP6 = (-kh * Cp(6) + kd * Cp(7)) * Wp;
+    
+    % Calculate flux balances for each solute
+    
+    % Na+ flux balance (cell)
+    dCc1dt = (JNKCC + JNBCs - JNHE - 3*JPUMP - JNBCp) / Wc;
+    
+    % K+ flux balance (cell)
+    dCc2dt = (2*JPUMP - JcsK - JcpK - JNKCC) / Wc;
+    
+    % Cl- flux balance (cell)
+    dCc3dt = (-2*JNKCC + JAEs + JAEp - JcpCl) / Wc;
+    
+    % HCO3- flux balance (cell)
+    dCc4dt = (-JAEs - JAEp - 2*JNBCs - 2*JNBCp + Cc(7) * params.Kd - Cc(4) * Cc(5) / params.Kd) / Wc;
+    
+    % H+ flux balance (cell)
+    dCc5dt = (JNHE + Cc(7) * params.Kd - Cc(4) * Cc(5) / params.Kd) / Wc;
+    
+    % CO2 flux balance (cell)
+    dCc6dt = (-JcsCO2 - JcpCO2 + RC6) / Wc;
+    
+    % H2CO3 flux balance (cell)
+    dCc7dt = (-JcsH2CO3 - JcpH2CO3 - RC6 - Cc(7) * params.Kd + Cc(4) * Cc(5) / params.Kd) / Wc;
+    
+    % Na+ flux balance (PC)
+    dCp1dt = (3*JPUMP + JNBCp - JspNa - Q*Cp(1)/Wp) / Wp;
+    
+    % K+ flux balance (PC)
+    dCp2dt = (-2*JPUMP + JcpK - JspK - Q*Cp(2)/Wp) / Wp;
+    
+    % Cl- flux balance (PC)
+    dCp3dt = (JcpCl + JAEp - JspCl - Q*Cp(3)/Wp) / Wp;
+    
+    % HCO3- flux balance (PC)
+    dCp4dt = (JAEp + 2*JNBCp - JspHCO3 - Q*Cp(4)/Wp + Cp(7) * params.Kd - Cp(4) * Cp(5) / params.Kd) / Wp;
+    
+    % H+ flux balance (PC)
+    dCp5dt = (-JspH - Q*Cp(5)/Wp + Cp(7) * params.Kd - Cp(4) * Cp(5) / params.Kd) / Wp;
+    
+    % CO2 flux balance (PC)
+    dCp6dt = (JcpCO2 - JspCO2 - Q*Cp(6)/Wp + RP6) / Wp;
+    
+    % H2CO3 flux balance (PC)
+    dCp7dt = (JcpH2CO3 - JspH2CO3 - Q*Cp(7)/Wp - RP6 - Cp(7) * params.Kd + Cp(4) * Cp(5) / params.Kd) / Wp;
+    
+    % Electroneutrality residuals
+    % Cell electroneutrality 
+    enResC = Cc(1) + Cc(2) - Cc(3) - Cc(4) + Cc(5) + params.zX * CX;
+    
+    % PC electroneutrality
+    enResP = Cp(1) + Cp(2) - Cp(3) - Cp(4) + Cp(5);
+    
+    % Rate of change of potentials (to enforce electroneutrality)
+    dVcdt = -10 * enResC;  % Adjusting cell potential to achieve electroneutrality
+    dVpdt = -10 * enResP;  % Adjusting PC potential to achieve electroneutrality
+    
+    % Rate of change of CX
+    dCXdt = 0;  % Fixed charge is constant
+    
+    % Rate of change of water flux
+    dQdt = 0.1 * ((Qsc - Qcp) + (Qcp + Qsp - Q));  % Adjust water flux to achieve conservation
+    
+    % Combine all rates of change
+    dydt = [dCc1dt; dCc2dt; dCc3dt; dCc4dt; dCc5dt; dCc6dt; dCc7dt;
+            dCp1dt; dCp2dt; dCp3dt; dCp4dt; dCp5dt; dCp6dt; dCp7dt;
+            dVcdt; dVpdt; dCXdt; dQdt];
+end
+
+%% Solve the System to Steady State
+function [t, y] = solve_aqueous_humor_model(params)
+    % Initial conditions
+    % Initial cell concentrations
+    Cc0 = [20, 150, 50, 25, 10^(-7.4), 1.5, 25*10^(-7.4)/5.3];
+    % Initial PC concentrations
+    Cp0 = [150, 5, 130, 25, 10^(-7.4), 1.5, 25*10^(-7.4)/5.3];
+    % Initial potentials
+    Vc0 = -70;
+    Vp0 = -1;
+    % Initial fixed charge
+    CX0 = 50;
+    % Initial water flux
+    Q0 = 1e-11;
+    
+    % Combine initial conditions
+    y0 = [Cc0, Cp0, Vc0, Vp0, CX0, Q0]';
+    
+    % Time span for integration
+    tspan = [0, 1000];  % Long enough to reach steady state
+    
+    % Solve the ODEs
+    options = odeset('RelTol', 1e-6, 'AbsTol', 1e-8);
+    [t, y] = ode15s(@(t, y) aqueous_humor_odes(t, y, params), tspan, y0, options);
+    
+    % Return the final steady state
+    fprintf('Steady state reached at t = %.2f\n', t(end));
+end
+
+%% Run model and analyze results
+function analyze_results(t, y, params)
+    % Get final state
+    final_state = y(end, :);
+    
+    % Extract concentrations
+    Cc = final_state(1:7);
+    Cp = final_state(8:14);
+    Vc = final_state(15);
+    Vp = final_state(16);
+    CX = final_state(17);
+    Q = final_state(18);
+    
+    % Display results
+    fprintf('===== Steady State Results =====\n');
+    fprintf('Cell concentrations (mM):\n');
+    fprintf('Na+: %.2f, K+: %.2f, Cl-: %.2f, HCO3-: %.2f\n', Cc(1), Cc(2), Cc(3), Cc(4));
+    fprintf('pH: %.2f\n', -log10(Cc(5)));
+    fprintf('CO2: %.2f, H2CO3: %.6f\n', Cc(6), Cc(7));
+    
+    fprintf('\nPC concentrations (mM):\n');
+    fprintf('Na+: %.2f, K+: %.2f, Cl-: %.2f, HCO3-: %.2f\n', Cp(1), Cp(2), Cp(3), Cp(4));
+    fprintf('pH: %.2f\n', -log10(Cp(5)));
+    fprintf('CO2: %.2f, H2CO3: %.6f\n', Cp(6), Cp(7));
+    
+    fprintf('\nPotentials (mV):\n');
+    fprintf('Cell: %.2f, PC: %.2f\n', Vc, Vp);
+    
+    fprintf('\nWater flux (m^3/s): %.2e\n', Q);
+    fprintf('Water flux (μL/min): %.2f\n', Q * 6e7);
+    
+    % Calculate ion fluxes for comparison with literature
+    % Dimensionless potential differences
+    phicp = params.F * (Vc - Vp) / (params.R * params.T);
+    
+    % Na+-K+ ATPase pump
+    KNa = 0.2 * (1 + Cc(2) / 8.33);
+    KK = 0.1 * (1 + Cp(1) / 18.5);
+    JPUMP = params.Ap * params.PPUMP * (Cc(1)/(KNa + Cc(1)))^3 * (Cp(2)/(KK + Cp(2)))^2;
+    
+    % Total fluxes of major ions
+    Na_flux = 3 * JPUMP / params.Ap;  % mol/m^2/s
+    K_flux = -2 * JPUMP / params.Ap;  % mol/m^2/s
+    
+    % Cl- channel (PC side)
+    Cl_flux = params.PpCl * phicp * (Cc(3) - Cp(3) * exp(phicp)) / (1 - exp(phicp));  % mol/m^2/s
+    
+    fprintf('\nIon fluxes (μmol/m^2/s):\n');
+    fprintf('Na+: %.2f, K+: %.2f, Cl-: %.2f\n', Na_flux*1e6, K_flux*1e6, Cl_flux*1e6);
+    
+    % Plot results
+    figure;
+    
+    % Plot concentrations
+    subplot(2, 2, 1);
+    bar([Cc(1:4); Cp(1:4); params.Cs(1:4)]');
+    set(gca, 'XTickLabel', {'Na+', 'K+', 'Cl-', 'HCO3-'});
+    legend('Cell', 'PC', 'Stroma');
+    title('Ion Concentrations');
+    ylabel('Concentration (mM)');
+    
+    % Plot pH
+    subplot(2, 2, 2);
+    bar([-log10(Cc(5)), -log10(Cp(5)), -log10(params.Cs(5))]);
+    set(gca, 'XTickLabel', {'Cell', 'PC', 'Stroma'});
+    title('pH');
+    
+    % Plot potentials
+    subplot(2, 2, 3);
+    bar([Vc, Vp, params.Vs]);
+    set(gca, 'XTickLabel', {'Cell', 'PC', 'Stroma'});
+    title('Membrane Potentials');
+    ylabel('Potential (mV)');
+    
+    % Plot water flux
+    subplot(2, 2, 4);
+    bar(Q * 6e7);  % Convert to μL/min
+    set(gca, 'XTickLabel', {'AH Production'});
+    title('Aqueous Humor Production');
+    ylabel('Flow Rate (μL/min)');
+    
+    % Create a more detailed figure for the entire system
+    figure;
+    
+    % Plot concentrations over time
+    subplot(3, 2, 1);
+    plot(t, y(:, 1:4), 'LineWidth', 1.5);
+    title('Cell Ion Concentrations');
+    xlabel('Time (s)');
+    ylabel('Concentration (mM)');
+    legend('Na+', 'K+', 'Cl-', 'HCO3-');
+    
+    subplot(3, 2, 2);
+    plot(t, y(:, 8:11), 'LineWidth', 1.5);
+    title('PC Ion Concentrations');
+    xlabel('Time (s)');
+    ylabel('Concentration (mM)');
+    legend('Na+', 'K+', 'Cl-', 'HCO3-');
+    
+    % Plot pH over time
+    subplot(3, 2, 3);
+    plot(t, -log10(y(:, 5)), 'LineWidth', 1.5);
+    title('Cell pH');
+    xlabel('Time (s)');
+    ylabel('pH');
+    
+    subplot(3, 2, 4);
+    plot(t, -log10(y(:, 12)), 'LineWidth', 1.5);
+    title('PC pH');
+    xlabel('Time (s)');
+    ylabel('pH');
+    
+    % Plot potentials over time
+    subplot(3, 2, 5);
+    plot(t, y(:, 15:16), 'LineWidth', 1.5);
+    title('Membrane Potentials');
+    xlabel('Time (s)');
+    ylabel('Potential (mV)');
+    legend('Cell', 'PC');
+    
+    % Plot water flux over time
+    subplot(3, 2, 6);
+    plot(t, y(:, 18) * 6e7, 'LineWidth', 1.5);  % Convert to μL/min
+    title('Aqueous Humor Production');
+    xlabel('Time (s)');
+    ylabel('Flow Rate (μL/min)');
+end
+
+%% Main function to run the model
+function main()
+    % Load parameters
+    params = initialize_parameters();
+    
+    % Run the model with normal CA
+    fprintf('Running model with normal CA activity...\n');
+    [t, y] = solve_aqueous_humor_model(params);
+    analyze_results(t, y, params);
+    
+    % Run the model with CA inhibition
+    fprintf('\nRunning model with CA inhibition...\n');
+    params.CA_inhibition = true;
+    [t_inhib, y_inhib] = solve_aqueous_humor_model(params);
+    analyze_results(t_inhib, y_inhib, params);
+    
+    % Compare normal vs. inhibited states
+    compare_ca_inhibition(y(end, :), y_inhib(end, :));
+end
+
+%% Function to compare normal vs. CA inhibited states
+function compare_ca_inhibition(normal_state, inhibited_state)
+    % Extract final states
+    % Normal
+    Cc_norm = normal_state(1:7);
+    Cp_norm = normal_state(8:14);
+    Q_norm = normal_state(18) * 6e7;  % Convert to μL/min
+    
+    % Inhibited
+    Cc_inhib = inhibited_state(1:7);
+    Cp_inhib = inhibited_state(8:14);
+    Q_inhib = inhibited_state(18) * 6e7;  % Convert to μL/min
+    
+    % Calculate percent change in AH production
+    percent_change = (Q_inhib - Q_norm) / Q_norm * 100;
+    
+    fprintf('\n===== Effect of CA Inhibition =====\n');
+    fprintf('AH Production Rate:\n');
+    fprintf('Normal: %.2f μL/min\n', Q_norm);
+    fprintf('Inhibited: %.2f μL/min\n', Q_inhib);
+    fprintf('Percent Change: %.1f%%\n', percent_change);
+    
+    fprintf('\nConcentration Changes in PC:\n');
+    fprintf('                Normal    Inhibited  Change\n');
+    fprintf('Na+ (mM):       %.2f      %.2f      %.1f%%\n', Cp_norm(1), Cp_inhib(1), (Cp_inhib(1)-Cp_norm(1))/Cp_norm(1)*100);
+    fprintf('K+ (mM):        %.2f      %.2f      %.1f%%\n', Cp_norm(2), Cp_inhib(2), (Cp_inhib(2)-Cp_norm(2))/Cp_norm(2)*100);
+    fprintf('Cl- (mM):       %.2f      %.2f      %.1f%%\n', Cp_norm(3), Cp_inhib(3), (Cp_inhib(3)-Cp_norm(3))/Cp_norm(3)*100);
+    fprintf('HCO3- (mM):     %.2f      %.2f      %.1f%%\n', Cp_norm(4), Cp_inhib(4), (Cp_inhib(4)-Cp_norm(4))/Cp_norm(4)*100);
+    fprintf('pH:             %.2f      %.2f      \n', -log10(Cp_norm(5)), -log10(Cp_inhib(5)));
+    
+    % Create comparison figure
+    figure;
+    
+    % Plot AH production comparison
+    subplot(1, 2, 1);
+    bar([Q_norm, Q_inhib]);
+    set(gca, 'XTickLabel', {'Normal CA', 'CA Inhibited'});
+    title('Aqueous Humor Production');
+    ylabel('Flow Rate (μL/min)');
+    
+    % Plot PC ion concentrations
+    subplot(1, 2, 2);
+    bar([Cp_norm(1:4); Cp_inhib(1:4)]');
+    set(gca, 'XTickLabel', {'Na+', 'K+', 'Cl-', 'HCO3-'});
+    legend('Normal CA', 'CA Inhibited');
+    title('PC Ion Concentrations');
+    ylabel('Concentration (mM)');
+end
+
+%% Function to initialize parameters
+function params = initialize_parameters()
+    % Geometric parameters
+    params.L = 1e-5;                % Cell length (m)
+    params.H = 6e-3;                % PC length (m)
+    params.As = 6e-4;               % Stromal side membrane area (m^2)
+    params.Ap = 6e-4;               % PC side membrane area (m^2)
+    params.Atj = 6e-7;              % Tight junction area (m^2)
+    params.APC = 2.6e-5;            
