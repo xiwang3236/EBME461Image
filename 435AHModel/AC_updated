@@ -1,0 +1,241 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
+# -------------------------------
+# 1) Full 18‑state model setup
+# -------------------------------
+F, R, T = 96485.33, 8.31446, 310.0
+RTF = R*T/F
+sigma = 1.0
+
+geom = {'As':6e-4,'Ap':6e-4,'Atj':6e-7,'APC':2.6e-5,'L':1e-5,'H':6e-3}
+Ks, Kp, Ktj = 2e-11, 2e-10, 2e-11
+
+Psi_s = {'CO2':1.5e-3,'H2CO3':1.28e-5}
+Psi_p = {k:10*v for k,v in Psi_s.items()}
+
+Pvals_base = {
+    'PNKCC':1e-6,'PNHE':3.4e-6,'PNBCs':6e-6,'PNBCp':1e-6,
+    'PAEs':4e-6,'PAEp':0.4e-6,'PPUMP':6e-6,
+    'PsK':5e-8,'PpK':30e-8,'PpCl':6e-8,'Ptj':600e-8
+}
+
+# reaction rates
+k1, k_1 = 1e5, 1e5/5.3     # choose faster k1,k_−1 so Kd=5.3
+kd, kh = 4.96e5, 1.45e3
+
+# species and indices
+spec7 = ['Na','K','Cl','HCO3','H','CO2','H2CO3']
+i_c = {s:i     for i,s in enumerate(spec7)}      # 0–6
+i_p = {s:i+7   for i,s in enumerate(spec7)}      # 7–13
+IDX_VC, IDX_VP, IDX_Q, IDX_CX = 14, 15, 16, 17
+
+# stromal boundary
+Cs = {'Na':150,'K':5,'Cl':130,'HCO3':25,'H':10**-7.42*1e3,'CO2':0.01,'H2CO3':0.0}
+charge = {'Na':1,'K':1,'Cl':-1,'HCO3':-1,'H':1,'CO2':0,'H2CO3':0}
+
+# -------------------------------
+# 2) Helpers for fluxes
+# -------------------------------
+def safe(x, eps=1e-12): return np.maximum(x, eps)
+def phi(v1,v2): return (v1-v2)/RTF
+
+def ghk(Pm,A,z,cin,cout,vin,vout):
+    dv,zv = phi(vin,vout), z*phi(vin,vout)
+    if zv>50:  return A*Pm*zv*cin
+    if zv<-50: return A*Pm*zv*cout
+    expm = np.exp(-zv)
+    return A*Pm*(zv*(cin-cout*expm)/(1-expm))
+
+def diff(Pm,A,c1,c2): return A*Pm*(c1-c2)
+
+# -------------------------------
+# 3) Residuals for least_squares
+# -------------------------------
+def membrane_fluxes_18(x):
+    Cc = {s:x[i_c[s]] for s in spec7}
+    Cp = {s:x[i_p[s]] for s in spec7}
+    Vc, Vp = x[IDX_VC], x[IDX_VP]
+    Vs = 0.0
+
+    # instantaneous bicarbonate equilibrium (fast)
+    # full kinetics not needed inside fluxes
+    # transporters:
+    JNKCC = geom['As']*Pvals['PNKCC']*np.log(
+        safe(Cc['K'])*safe(Cc['Na'])*safe(Cc['Cl'])**2 /
+        (Cs['K']*Cs['Na']*Cs['Cl']**2)
+    )
+    JNBCs = geom['As']*Pvals['PNBCs']*(
+        np.log(safe(Cc['Na'])*safe(Cc['HCO3'])**2 /
+               (Cs['Na']*Cs['HCO3']**2))
+        - phi(Vc,Vs)
+    )
+    JNBCp = geom['Ap']*Pvals['PNBCp']*(
+        np.log(safe(Cc['Na'])*safe(Cc['HCO3'])**2 /
+               (safe(Cp['Na'])*safe(Cp['HCO3'])**2))
+        - phi(Vc,Vp)
+    )
+    JAEs = geom['As']*Pvals['PAEs']*np.log(
+        Cs['Cl']*safe(Cc['HCO3'])/(safe(Cc['Cl'])*Cs['HCO3'])
+    )
+    JAEp = geom['Ap']*Pvals['PAEp']*np.log(
+        safe(Cp['Cl'])*safe(Cc['HCO3'])/(safe(Cc['Cl'])*safe(Cp['HCO3']))
+    )
+    JNHE = geom['As']*Pvals['PNHE']*np.log(
+        Cs['H']*safe(Cc['Na'])/(safe(Cc['H'])*Cs['Na'])
+    )
+    # pump
+    KNa = 0.2*(1+Cc['K']/8.33)
+    KK  = 0.1*(1+Cp['Na']/18.5)
+    JPUMP = geom['Ap']*Pvals['PPUMP']*(Cc['Na']/(KNa+Cc['Na']))**3*(Cp['K']/(KK+Cp['K']))**2
+
+    # channels & TJ
+    JcsK = ghk(Pvals['PsK'],geom['As'],1,Cc['K'],Cs['K'],Vc,Vs)
+    JcpK = ghk(Pvals['PpK'],geom['Ap'],1,Cc['K'],Cp['K'],Vc,Vp)
+    JcpCl= ghk(Pvals['PpCl'],geom['Ap'],-1,Cc['Cl'],Cp['Cl'],Vc,Vp)
+    Jsp = {ion:diff(Pvals['Ptj'],geom['Atj'],Cs[ion],Cp[ion]) for ion in ['Na','K','Cl','HCO3']}
+
+    # CO2/H2CO3 diffusion
+    JcsCO2  = diff(Psi_s['CO2'],geom['As'], Cs['CO2'], Cc['CO2'])
+    JcpCO2  = diff(Psi_p['CO2'],geom['Ap'], Cc['CO2'], Cp['CO2'])
+    JspCO2  = diff(Psi_s['CO2'],geom['Atj'],Cs['CO2'], Cp['CO2'])
+    JcsH2C  = diff(Psi_s['H2CO3'],geom['As'],Cs['H2CO3'],Cc['H2CO3'])
+    JcpH2C  = diff(Psi_p['H2CO3'],geom['Ap'],Cc['H2CO3'],Cp['H2CO3'])
+    JspH2C  = diff(Psi_s['H2CO3'],geom['Atj'],Cs['H2CO3'],Cp['H2CO3'])
+
+    return {
+      'sc_Na':JNKCC+JNBCs, 'cp_Na':3*JPUMP+JNBCp,'sp_Na':Jsp['Na'],
+      'sc_K':JNKCC, 'cp_K':-2*JPUMP+JcpK,'sp_K':Jsp['K'],
+      'sc_Cl':-JAEs+2*JNKCC,'cp_Cl':JcpCl-JAEp,'sp_Cl':Jsp['Cl'],
+      'sc_HCO3':-JNBCs+JAEs,'cp_HCO3':-JNBCp+JAEp,'sp_HCO3':Jsp['HCO3'],
+      'sc_H':-JNHE,'cp_H':0,'sp_H':0,
+      'sc_CO2':JcsCO2,'cp_CO2':JcpCO2,'sp_CO2':JspCO2,
+      'sc_H2CO3':JcsH2C,'cp_H2CO3':JcpH2C,'sp_H2CO3':JspH2C,
+      'JPUMP':JPUMP,'JNKCC':JNKCC,'JNHE':JNHE,'JNBCs':JNBCs,
+      'JNBCp':JNBCp,'JAEs':JAEs,'JAEp':JAEp
+    }
+
+def water_fluxes_18(x):
+    Cc = [x[i_c[s]] for s in spec7]
+    Cp = [x[i_p[s]] for s in spec7]
+    Cc_H2C = x[i_c['H2CO3']]
+    Cp_H2C = x[i_p['H2CO3']]
+    CX = x[IDX_CX]
+    tot_s = sum(Cs.values())
+    tot_c = sum(Cc)+CX+Cc_H2C
+    tot_p = sum(Cp)+Cp_H2C
+    Qsc = -geom['As']*Ks*sigma*R*T*(tot_s-tot_c)
+    Qcp = -geom['Ap']*Kp*sigma*R*T*(tot_c-tot_p)
+    Qsp = -geom['Atj']*Ktj*sigma*R*T*(tot_s-tot_p)
+    return Qsc, Qcp, Qsp
+
+def residuals_18(x, Pvals, k1, k_1, kd, kh):
+    res = np.zeros(18)
+    Wc = geom['As']*geom['L']
+    Wp = geom['APC']*geom['H']
+    FL = membrane_fluxes_18(x)
+    Qsc, Qcp, Qsp = water_fluxes_18(x)
+    # reactions
+    # R1: HCO3 + H -> H2CO3
+    R1c =  k1*x[i_c['HCO3']]*x[i_c['H']] - k_1*x[i_c['H2CO3']]
+    R1p =  k1*x[i_p['HCO3']]*x[i_p['H']] - k_1*x[i_p['H2CO3']]
+    # R2: H2CO3 -> CO2 + H2O
+    R2c =  kd*x[i_c['H2CO3']] - kh*x[i_c['CO2']]
+    R2p =  kd*x[i_p['H2CO3']] - kh*x[i_p['CO2']]
+    # mass balances
+    for i,s in enumerate(spec7):
+        ic, ip = i_c[s], i_p[s]
+        Jsc, Jcp, Jsp = FL[f'sc_{s}'], FL[f'cp_{s}'], FL[f'sp_{s}']
+        Rci = R1c*(s=='H2CO3') + R2c*(s in ['H2CO3'])
+        Rpi = R1p*(s=='H2CO3') + R2p*(s in ['H2CO3'])
+        res[ic] = ( Jsc - Jcp + Rci )/Wc
+        res[ip] = ( Jcp + Jsp - x[IDX_Q]*x[ip] + Rpi )/Wp
+    # electroneutrality
+    res[IDX_VC] = sum(charge[s]*x[i_c[s]] for s in spec7) + (-1.5)*x[IDX_CX]
+    res[IDX_VP] = sum(charge[s]*x[i_p[s]] for s in spec7)
+    # water
+    res[IDX_Q ] = Qsc - Qcp
+    res[IDX_CX] = Qcp + Qsp - x[IDX_Q]
+    return res
+
+# -------------------------------
+# 4) Initial guess & solve
+# -------------------------------
+# initial guess from Table 2
+x0 = np.zeros(18)
+table2 = {'Na':(17.8,151.8),'K':(154.4,4.3),'Cl':(45,126.9),
+          'HCO3':(26.9,28.6),'H':(10**-7.46*1e3,10**-7.49*1e3),
+          'CO2':(0.01,0.01),'H2CO3':(0,0)}
+for s,(cc,cp) in table2.items():
+    x0[i_c[s]] = cc
+    x0[i_p[s]] = cp
+x0[IDX_VC],x0[IDX_VP] = -0.0756, -0.00156
+x0[IDX_Q], x0[IDX_CX]  = 2.9e-11, 150.0
+
+# bounds
+lb, ub = -np.inf*np.ones(18), np.inf*np.ones(18)
+lb[:14] = 1e-12    # all concentrations ≥ eps
+lb[IDX_Q] = 1e-20
+lb[IDX_CX]=1e-12
+
+# --- after you build x0 and lb, but before calling least_squares ---
+# Make sure every x0[i] ≥ lb[i]:
+x0 = np.maximum(x0, lb)
+
+# Now x0 is guaranteed inside the box:
+sol = least_squares(lambda x: residuals_18(x, Pvals_base, k1, k_1, kd, kh),
+                    x0, bounds=(lb, ub), method='trf',
+                    xtol=1e-10, ftol=1e-10, gtol=1e-10)
+print("Converged:", sol.success, "||res||₂=", np.linalg.norm(sol.fun))
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
+# --- 1) Solve baseline (CA ON) ---
+sol_ca = least_squares(
+    lambda x: residuals_18(x, Pvals_base, k1, k_1, kd, kh),
+    x0, bounds=(lb, ub), method='trf',
+    xtol=1e-10, ftol=1e-10, gtol=1e-10
+)
+x_base = sol_ca.x
+
+# --- 2) Solve no‐CA (rates slowed 1e6×) ---
+sol_nc = least_squares(
+    lambda x: residuals_18(x, Pvals_base, k1, k_1, kd/1e6, kh/1e6),
+    x_base, bounds=(lb, ub), method='trf',
+    xtol=1e-10, ftol=1e-10, gtol=1e-10
+)
+x_noca = sol_nc.x
+
+# --- 3) Plot updated Fig.5 with all 10 fluxes ---
+channels = [
+    'JPUMP','JNKCC','JNBCs','JNBCp','JAEp','JAEs','JNHE',
+    'sc_K','cp_K','cp_Cl'
+]
+labels = [
+    'PUMP','NKCC','NBC$_s$','NBC$_p$','AE$_p$','AE$_s$','NHE',
+    'J$_{cs}^{K+}$','J$_{cp}^{K+}$','J$_{cp}^{Cl^-}$'
+]
+
+Fb = membrane_fluxes_18(x_base)
+Fn = membrane_fluxes_18(x_noca)
+
+vals_ca   = np.array([Fb[ch] for ch in channels])
+vals_noca = np.array([Fn[ch] for ch in channels])
+
+x = np.arange(len(channels))
+w = 0.35
+
+fig, ax = plt.subplots(figsize=(10,5))
+ax.bar(x - w/2, vals_ca,   w, label='CA')
+ax.bar(x + w/2, vals_noca, w, label='No CA')
+
+ax.set_xticks(x)
+ax.set_xticklabels(labels, rotation=45, ha='right')
+ax.set_ylabel('Flux (mol / m² s)')
+ax.set_title('Fig.5: Ion‐flux change with CA inhibition')
+ax.legend()
+plt.tight_layout()
+plt.show()
